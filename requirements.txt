@@ -1,0 +1,4 @@
+mcp>=1.28
+pg8000>=1.31
+# HTTP mode (server.py --http) additionally needs:
+# uvicorn>=0.30
