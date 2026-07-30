@@ -5,3 +5,6 @@ venv/
 .DS_Store
 http-token
 *.log
+
+# Rust build artifacts (Cargo.lock committed)
+/target

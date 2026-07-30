@@ -1,0 +1,42 @@
+# LTM-MCP — Rust reimplementation (workspace).
+#
+# The Python server.py is the behavioral spec; this workspace splits the port
+# into independent crates so multiple agents can implement them in parallel
+# without colliding. Dependency direction:
+#
+#   ltm-core  (types, config, errors, TRAIT CONTRACTS — the shared interface)
+#      ▲   ▲   ▲
+#      │   │   └──────────── ltm-db      (Postgres + pgvector: impl Store)
+#      │   └──────────────── ltm-embed   (pluggable embedding backends: impl EmbeddingBackend)
+#      │   └──────────────── ltm-rerank  (optional cross-encoder: impl Reranker)
+#      └── ltm-tools (ltm_search / ltm_get_document / ltm_stats, over the traits)
+#              ▲
+#          ltm-server (MCP stdio + streamable HTTP + bearer gate; wires concrete impls)
+#
+# Contracts live in ltm-core and are treated as FROZEN during parallel work:
+# implementers code against them; only integration touches wiring.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/ltm-core",
+    "crates/ltm-db",
+    "crates/ltm-embed",
+    "crates/ltm-rerank",
+    "crates/ltm-tools",
+    "crates/ltm-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ltm-core = { path = "crates/ltm-core" }
+ltm-db = { path = "crates/ltm-db" }
+ltm-embed = { path = "crates/ltm-embed" }
+ltm-rerank = { path = "crates/ltm-rerank" }
+ltm-tools = { path = "crates/ltm-tools" }

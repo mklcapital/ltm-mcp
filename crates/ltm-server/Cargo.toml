@@ -1,0 +1,21 @@
+[package]
+name = "ltm-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ltm-mcp"
+path = "src/main.rs"
+
+[dependencies]
+ltm-core.workspace = true
+ltm-db.workspace = true
+ltm-embed.workspace = true
+ltm-rerank.workspace = true
+ltm-tools.workspace = true
+serde_json.workspace = true
+# Implementer: add the MCP SDK + async runtime + HTTP server, e.g.
+#   rmcp = { version = "0.x", features = ["server", "transport-io", "transport-streamable-http-server"] }
+#   tokio = { version = "1", features = ["full"] }
+#   axum / hyper for the bearer-gated streamable-HTTP transport
