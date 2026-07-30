@@ -17,8 +17,13 @@ Non-obvious notes for this environment:
   `mcp.server.fastmcp` import path the code uses. The update script installs
   `mcp<2` (1.29.x) after `requirements.txt` — do not "upgrade" it to 2.x.
 - **Postgres is not auto-started (no systemd).** Start it with
-  `sudo pg_ctlcluster 16 main start`. The cluster listens on **5432**, but the
+  `sudo pg_ctlcluster 18 main start`. The cluster listens on **5432**, but the
   server defaults to **5433**, so run it with `LTM_PGPORT=5432`.
+- **Use the latest stable PostgreSQL.** This env runs **PostgreSQL 18** (18.x,
+  the current stable major; 19 is still beta until ~Sept 2026) with
+  **pgvector 0.8.5**, installed from the official PGDG apt repo — not the older
+  distro default (16). Postgres has no "LTS" track; every major gets 5 years of
+  support.
 - **Loopback auth is set to `trust`** in `pg_hba.conf` for local dev, because the
   code's `pg8000` connection sends no password. DB is `brain`, user `postgres`,
   with the `vector` extension enabled.
@@ -37,10 +42,21 @@ Non-obvious notes for this environment:
   gate (raw mxbai cosines cluster lower, so a relevant hit ~0.6 still reads
   "LOW (cosine only)" while nonsense scores ~0.28 — the discrimination is real).
 
-### Project direction: Rust/Swift only
+### Project direction (per maintainer)
 
-Per the maintainer: this Python server is a **prototype**. The long-term goal is
-to port everything to Rust (and Swift for any Apple-platform UI), targeting the
-latest iPhone/iPad/macOS technologies. Treat `server.py` as the behavioral spec
-for the Rust port; write new functionality in Rust/Swift with a short rationale
-for the language choice rather than extending the Python.
+- **These are Linux server apps and must be Rust only.** `ltm-mcp` drifting into
+  Python was a mistake — it was always meant to be Rust ("Rust only from day
+  one"), and **the MCP server in particular must be Rust**. Treat `server.py` as
+  the behavioral spec for a Rust reimplementation; write new functionality in
+  Rust, not Python.
+- **Swift is only for genuinely native Apple client apps** (macOS / iPhone /
+  iPad / Apple Silicon viewers) that talk to these servers — never for the
+  servers themselves. All heavy lifting, including GUI rendering, stays
+  server-side and is exposed over web tech (and optional Apple-native
+  viewers/browsers).
+- **The model backend must be pluggable/configurable.** Local Ollama
+  (llama.cpp) is one option, but OpenRouter, an LM Studio-hosted server, on-prem
+  Macs, or cloud model providers must be swappable without disruption. Do not
+  hard-wire Ollama into the Rust port.
+- **The vector store is PostgreSQL + pgvector and stays** (unless something more
+  powerful is warranted), on the latest stable PostgreSQL.
