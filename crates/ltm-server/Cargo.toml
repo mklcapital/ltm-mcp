@@ -15,7 +15,12 @@ ltm-embed.workspace = true
 ltm-rerank.workspace = true
 ltm-tools.workspace = true
 serde_json.workspace = true
-# Implementer: add the MCP SDK + async runtime + HTTP server, e.g.
-#   rmcp = { version = "0.x", features = ["server", "transport-io", "transport-streamable-http-server"] }
-#   tokio = { version = "1", features = ["full"] }
-#   axum / hyper for the bearer-gated streamable-HTTP transport
+rmcp = { version = "3", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.9"
+subtle = "2"
+base64 = "0.22"

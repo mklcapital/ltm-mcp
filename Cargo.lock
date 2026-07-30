@@ -810,6 +810,7 @@ name = "ltm-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "ltm-core",
  "ltm-db",
  "ltm-embed",
@@ -817,10 +818,10 @@ dependencies = [
  "ltm-tools",
  "rand 0.9.5",
  "rmcp",
- "serde",
  "serde_json",
  "subtle",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
