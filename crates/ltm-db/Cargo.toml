@@ -7,6 +7,5 @@ license.workspace = true
 [dependencies]
 ltm-core.workspace = true
 serde_json.workspace = true
-# Implementer: add a blocking Postgres client, e.g.
-#   postgres = "0.19"        # sync libpq-free client (tokio-postgres blocking wrapper)
-#   pgvector = { version = "0.4", features = ["postgres"] }
+postgres = "0.19"
+pgvector = { version = "0.4", features = ["postgres"] }
