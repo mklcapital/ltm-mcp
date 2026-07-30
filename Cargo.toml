@@ -25,6 +25,7 @@ members = [
     "crates/ltm-rerank",
     "crates/ltm-tools",
     "crates/ltm-server",
+    "crates/ltm-e2e",
 ]
 
 [workspace.package]

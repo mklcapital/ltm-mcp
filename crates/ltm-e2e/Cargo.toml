@@ -1,0 +1,42 @@
+# ltm-e2e — integration / end-to-end harness for the Rust LTM-MCP port.
+#
+# This crate is NOT part of the runtime server. It (re)seeds a small corpus into
+# the live Postgres+pgvector database (embedding each chunk via Ollama) and then
+# drives the real `ltm-tools` pipeline (PgStore + Ollama backend + NoopReranker)
+# against the live services, mirroring how server.py was verified.
+#
+# It depends on the sibling crates through their FROZEN `ltm-core` contracts, so
+# it compiles today while those crates are still stubs and turns green once they
+# are implemented. Live-service checks SKIP (never fail) when a dependency is
+# still a stub or a service is unreachable.
+
+[package]
+name = "ltm-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "ltm_e2e"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ltm-e2e"
+path = "src/main.rs"
+
+[dependencies]
+ltm-core = { workspace = true }
+ltm-db = { workspace = true }
+ltm-embed = { workspace = true }
+ltm-rerank = { workspace = true }
+ltm-tools = { workspace = true }
+serde_json = { workspace = true }
+# The seed utility talks to Postgres and Ollama directly (see src/seed.rs and
+# src/embed.rs for the rationale), independent of the still-stubbed sibling
+# crates, so seeding works today.
+postgres = "0.19"
+ureq = "2"
+
+[dev-dependencies]
+ltm-core = { workspace = true }
