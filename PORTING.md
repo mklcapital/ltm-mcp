@@ -82,6 +82,27 @@ Spec: `server.py` `mcp.run()` (stdio) and `run_http()` (streamable HTTP).
   constant-time compare; access log off; allow `public_host`).
 - Suggested deps: `rmcp` (official Rust MCP SDK) + `tokio` + `axum`/`hyper`.
 
+### 7. `ltm-bridge` — OpenAI-compatible tool-calling bridge (leaf utility)
+Not part of the runtime server (like `ltm-e2e`). Connects to the LTM over MCP
+streamable HTTP (rmcp client + bearer token), advertises the tools to any
+`/v1/chat/completions` endpoint (OpenRouter, LM Studio server mode, Ollama,
+Groq, vLLM, OpenAI), and loops model → tool → model. One-shot
+(`ltm-bridge "question"`) or interactive.
+
+## Spec extension: ChatGPT-connector `search`/`fetch` aliases
+
+OpenAI's connector / Deep Research contract requires tools named exactly
+`search(query)` and `fetch(id)` with a fixed shape (search →
+`{"results": [{id, title, text, url}]}`, fetch →
+`{id, title, text, url, metadata}`). The Rust port implements these as
+`ltm-tools::compat_search`/`compat_fetch` (per-document dedup, honest
+confidence passed through) and `ltm-server` registers them via a second tool
+router — by default only in HTTP mode, where cloud connectors arrive
+(`LTM_COMPAT_TOOLS=on|off|auto` overrides; stdio keeps the 3-tool surface).
+This is a deliberate Rust-first extension: it is NOT mirrored back into
+`server.py`, which remains the behavioral spec for the original three tools
+only.
+
 ## Integration
 
 Each crate is merged onto the workspace branch; `ltm-server` wiring already

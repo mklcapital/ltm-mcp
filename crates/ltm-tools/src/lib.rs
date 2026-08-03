@@ -20,6 +20,12 @@ use serde_json::{json, Value};
 const MAX_K: usize = 50;
 /// How many characters a search hit's snippet shows (server.py `SNIPPET_CHARS`).
 const SNIPPET_CHARS: usize = 350;
+/// How many hits the ChatGPT-compat `search` alias requests (its contract has
+/// no `k` argument, so it uses ltm_search's default).
+const COMPAT_SEARCH_K: usize = 8;
+/// Text cap for the ChatGPT-compat `fetch` alias (no `max_chars` argument in
+/// the contract; generous enough for whole documents, still bounded).
+const COMPAT_FETCH_MAX_CHARS: usize = 100_000;
 
 pub struct Tools<'a> {
     pub cfg: &'a Config,
@@ -226,6 +232,111 @@ impl<'a> Tools<'a> {
             }
             Err(e) => json!({ "error": e.to_string() }),
         }
+    }
+
+    /// ChatGPT-connector `search` alias. OpenAI's connector / Deep Research
+    /// contract requires a tool named exactly `search` taking a single query
+    /// string and returning `{"results": [{id, title, text, url}]}`. Wraps
+    /// [`Self::ltm_search`] (same read-only pipeline), dedupes hits per
+    /// document, and passes the honest `confidence` verdict through.
+    pub fn compat_search(&self, query: &str) -> Value {
+        let res = self.ltm_search(query, COMPAT_SEARCH_K, true, None, None);
+        if res.get("results").is_none() {
+            return res; // embed/db error shape — pass through
+        }
+        let confidence = res.get("confidence").cloned().unwrap_or(Value::Null);
+        let mut seen = std::collections::HashSet::new();
+        let mut results = Vec::new();
+        if let Some(hits) = res.get("results").and_then(Value::as_array) {
+            for hit in hits {
+                let Some(doc_id) = hit.get("doc_id").and_then(Value::as_i64) else {
+                    continue;
+                };
+                if !seen.insert(doc_id) {
+                    continue;
+                }
+                let title = hit
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| hit.get("path").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("document {doc_id}"));
+                results.push(json!({
+                    "id": doc_id.to_string(),
+                    "title": title,
+                    "text": hit.get("snippet").cloned().unwrap_or_else(|| json!("")),
+                    "url": format!("ltm://doc/{doc_id}"),
+                }));
+            }
+        }
+        json!({ "results": results, "confidence": confidence })
+    }
+
+    /// ChatGPT-connector `fetch` alias: full document text by the id a
+    /// `search` result returned, shaped `{id, title, text, url, metadata}`.
+    /// Ambiguous or missing ids return the `{"error": ...}` shape (the
+    /// transport surfaces it as a tool error).
+    pub fn compat_fetch(&self, key: &DocKey) -> Value {
+        let doc = self.ltm_get_document(key, COMPAT_FETCH_MAX_CHARS);
+        if doc.get("found").and_then(Value::as_bool) != Some(true) {
+            if doc.get("ambiguous").and_then(Value::as_bool) == Some(true) {
+                let cands = doc
+                    .get("candidates")
+                    .and_then(Value::as_array)
+                    .map(|cs| {
+                        cs.iter()
+                            .map(|c| {
+                                format!(
+                                    "{}: {}",
+                                    c.get("doc_id").and_then(Value::as_i64).unwrap_or(0),
+                                    c.get("path").and_then(Value::as_str).unwrap_or("?"),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .unwrap_or_default();
+                return json!({
+                    "error": format!(
+                        "ambiguous id {} — call fetch with one of: {cands}",
+                        key_repr(key)
+                    ),
+                });
+            }
+            let msg = doc
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("document lookup failed")
+                .to_string();
+            return json!({ "error": msg });
+        }
+
+        let doc_id = doc.get("doc_id").and_then(Value::as_i64).unwrap_or(0);
+        let title = doc
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or_else(|| doc.get("path").and_then(Value::as_str))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("document {doc_id}"));
+        json!({
+            "id": doc_id.to_string(),
+            "title": title,
+            "text": doc.get("text").cloned().unwrap_or_else(|| json!("")),
+            "url": format!("ltm://doc/{doc_id}"),
+            "metadata": {
+                "path": doc.get("path").cloned().unwrap_or(Value::Null),
+                "doc_type": doc.get("doc_type").cloned().unwrap_or(Value::Null),
+                "source": doc.get("source").cloned().unwrap_or(Value::Null),
+                "doc_date": doc.get("doc_date").cloned().unwrap_or(Value::Null),
+                "mime": doc.get("mime").cloned().unwrap_or(Value::Null),
+                "extraction": doc.get("extraction").cloned().unwrap_or(Value::Null),
+                "ocr": doc.get("ocr").cloned().unwrap_or(Value::Null),
+                "char_count": doc.get("char_count").cloned().unwrap_or(Value::Null),
+                "truncated": doc.get("truncated").cloned().unwrap_or(Value::Null),
+            },
+        })
     }
 
     /// Corpus health: counts, coverage, index status, and embed/rerank health.
@@ -784,6 +895,169 @@ mod tests {
                 "found": false,
                 "error": "no document matches 'nope' (id, path, or fragment)",
             })
+        );
+    }
+
+    // ---- compat (ChatGPT `search`/`fetch` alias) tests -------------------
+
+    #[test]
+    fn compat_search_shape_dedupes_per_document() {
+        let cfg = cfg();
+        // Two chunks of doc 10 and one of doc 11 — doc 10 must appear once.
+        let store = FakeStore {
+            rows: vec![
+                row(1, 10, 0.90, "first chunk of ten"),
+                row(2, 10, 0.88, "second chunk of ten"),
+                row(3, 11, 0.86, "chunk of eleven"),
+            ],
+            hnsw: true,
+            ..Default::default()
+        };
+        let embed = FakeEmbed {
+            health: "ok".into(),
+        };
+        let rr = unavailable_reranker();
+        let tools = Tools {
+            cfg: &cfg,
+            store: &store,
+            embed: &embed,
+            rerank: &rr,
+        };
+
+        let v = tools.compat_search("q");
+        let results = v["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["id"], json!("10"));
+        assert_eq!(results[0]["title"], json!("Doc 10"));
+        assert_eq!(results[0]["text"], json!("first chunk of ten"));
+        assert_eq!(results[0]["url"], json!("ltm://doc/10"));
+        assert_eq!(results[1]["id"], json!("11"));
+        // Honest confidence passed through (0.9 cosine → high, cosine-only).
+        assert_eq!(
+            v["confidence"],
+            json!("high (cosine only — enable rerank for a calibrated verdict)")
+        );
+    }
+
+    #[test]
+    fn compat_search_title_falls_back_to_path() {
+        let cfg = cfg();
+        let mut r = row(1, 10, 0.9, "x");
+        r.title = None;
+        let store = FakeStore {
+            rows: vec![r],
+            hnsw: true,
+            ..Default::default()
+        };
+        let embed = FakeEmbed {
+            health: "ok".into(),
+        };
+        let rr = unavailable_reranker();
+        let tools = Tools {
+            cfg: &cfg,
+            store: &store,
+            embed: &embed,
+            rerank: &rr,
+        };
+
+        let v = tools.compat_search("q");
+        assert_eq!(v["results"][0]["title"], json!("/root/path/10.txt"));
+    }
+
+    #[test]
+    fn compat_fetch_found_shape() {
+        let cfg = cfg();
+        let store = FakeStore {
+            lookup: Some(DocLookup::Found(Box::new(document("full text here")))),
+            ..Default::default()
+        };
+        let embed = FakeEmbed {
+            health: "ok".into(),
+        };
+        let rr = unavailable_reranker();
+        let tools = Tools {
+            cfg: &cfg,
+            store: &store,
+            embed: &embed,
+            rerank: &rr,
+        };
+
+        let v = tools.compat_fetch(&DocKey::Id(42));
+        assert_eq!(v["id"], json!("42"));
+        assert_eq!(v["title"], json!("A Lease"));
+        assert_eq!(v["text"], json!("full text here"));
+        assert_eq!(v["url"], json!("ltm://doc/42"));
+        assert_eq!(v["metadata"]["path"], json!("/root/leases/a.txt"));
+        assert_eq!(v["metadata"]["doc_type"], json!("lease"));
+        assert_eq!(v["metadata"]["ocr"], json!(false));
+        assert_eq!(v["metadata"]["truncated"], json!(false));
+        assert_eq!(v.get("error"), None);
+    }
+
+    #[test]
+    fn compat_fetch_ambiguous_is_error_listing_candidates() {
+        let cfg = cfg();
+        let store = FakeStore {
+            lookup: Some(DocLookup::Ambiguous {
+                candidates: vec![
+                    DocCandidate {
+                        doc_id: 1,
+                        path: "/r/a.txt".into(),
+                        doc_type: "lease".into(),
+                        title: Some("A".into()),
+                        char_count: Some(10),
+                    },
+                    DocCandidate {
+                        doc_id: 2,
+                        path: "/r/b.txt".into(),
+                        doc_type: "untyped".into(),
+                        title: None,
+                        char_count: None,
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+        let embed = FakeEmbed {
+            health: "ok".into(),
+        };
+        let rr = unavailable_reranker();
+        let tools = Tools {
+            cfg: &cfg,
+            store: &store,
+            embed: &embed,
+            rerank: &rr,
+        };
+
+        let v = tools.compat_fetch(&DocKey::PathOrFragment("a".into()));
+        let err = v["error"].as_str().unwrap();
+        assert!(err.starts_with("ambiguous id 'a'"), "got: {err}");
+        assert!(err.contains("1: /r/a.txt"), "got: {err}");
+        assert!(err.contains("2: /r/b.txt"), "got: {err}");
+    }
+
+    #[test]
+    fn compat_fetch_not_found_is_error() {
+        let cfg = cfg();
+        let store = FakeStore {
+            lookup: Some(DocLookup::NotFound),
+            ..Default::default()
+        };
+        let embed = FakeEmbed {
+            health: "ok".into(),
+        };
+        let rr = unavailable_reranker();
+        let tools = Tools {
+            cfg: &cfg,
+            store: &store,
+            embed: &embed,
+            rerank: &rr,
+        };
+
+        let v = tools.compat_fetch(&DocKey::PathOrFragment("nope".into()));
+        assert_eq!(
+            v["error"],
+            json!("no document matches 'nope' (id, path, or fragment)")
         );
     }
 

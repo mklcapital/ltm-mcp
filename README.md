@@ -1,10 +1,11 @@
 # LTM MCP Server
 
 An MCP server that lets any MCP-capable AI — Claude Code, Claude Desktop,
-LM Studio, and (via a tunnel) cloud AIs like claude.ai and ChatGPT — search
-your own local **Long-Term Memory**: a Postgres + pgvector corpus of your
-documents, embedded with `mxbai-embed-large` and optionally reranked by a
-local cross-encoder.
+LM Studio, Cursor, Codex, Gemini CLI, and (via a tunnel) cloud AIs like
+claude.ai and ChatGPT, plus OpenAI-compatible APIs like OpenRouter through
+the bundled `ltm-bridge` — search your own local **Long-Term Memory**: a
+Postgres + pgvector corpus of your documents, embedded with
+`mxbai-embed-large` and optionally reranked by a local cross-encoder.
 
 **Local-only. Read-only. No secrets.** The server talks to Postgres and
 Ollama on 127.0.0.1; the Postgres session is forced into read-only
@@ -105,8 +106,19 @@ constant-time; `/healthz` is open and returns only "ok".
 The server binds 127.0.0.1 only. Expose it exclusively through an
 outbound-only tunnel (Cloudflare Tunnel, Tailscale Funnel) — never a
 port-forward. Set `LTM_PUBLIC_HOST` to your tunnel hostname so it passes the
-transport-security host check. Hookup steps for claude.ai / ChatGPT / Gemini
-CLI: [docs/CONNECT-CLOUD-AIS.md](docs/CONNECT-CLOUD-AIS.md).
+transport-security host check. Hookup steps for claude.ai / ChatGPT (incl.
+Deep Research) / Codex / Gemini / Cursor / LM Studio / OpenRouter:
+[docs/CONNECT-CLOUD-AIS.md](docs/CONNECT-CLOUD-AIS.md).
+
+In HTTP mode the Rust server (`crates/ltm-server`, binary `ltm-mcp`)
+additionally registers `search`/`fetch` — the exact tool names OpenAI's
+connector and Deep Research contract requires — as thin aliases over
+`ltm_search`/`ltm_get_document` (deduped per document, honest confidence
+passed through). stdio keeps the clean 3-tool surface;
+`LTM_COMPAT_TOOLS=on|off|auto` overrides. For APIs that speak OpenAI's
+`/v1/chat/completions` dialect but can't run MCP tools themselves
+(OpenRouter, Ollama, Groq, LM Studio's server mode), use the bundled
+tool-calling bridge: [crates/ltm-bridge](crates/ltm-bridge).
 
 ## Config (env, all optional)
 
@@ -120,6 +132,7 @@ CLI: [docs/CONNECT-CLOUD-AIS.md](docs/CONNECT-CLOUD-AIS.md).
 | `LTM_RERANK_CANDIDATES` | 50 | rerank pool size |
 | `LTM_LOW_RERANK` / `LTM_HIGH_RERANK` | 3 / 6 | confidence gates |
 | `LTM_HTTP_HOST` / `LTM_HTTP_PORT` | 127.0.0.1 / 8322 | HTTP mode |
+| `LTM_COMPAT_TOOLS` | auto | `search`/`fetch` aliases (Rust server): auto = HTTP mode only |
 | `LTM_HTTP_TOKEN_FILE` | ~/.ltm/http-token | bearer token file |
 | `LTM_PUBLIC_HOST` | unset | public tunnel hostname (HTTP mode) |
 

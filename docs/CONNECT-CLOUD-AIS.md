@@ -1,9 +1,23 @@
-# Connecting cloud AIs to the LTM
+# Connecting other AIs to the LTM
 
-How to let claude.ai, ChatGPT, and Gemini CLI query your local corpus from
-anywhere, without opening a port. The pattern: `server.py --http` bound to
-127.0.0.1, an outbound-only tunnel (Cloudflare Tunnel or Tailscale Funnel) in
-front of it, bearer token required on every request.
+How to let claude.ai, ChatGPT (incl. Deep Research), Codex, Gemini, Cursor,
+LM Studio, and OpenAI-compatible APIs (OpenRouter, ...) query your local
+corpus from anywhere, without opening a port. The pattern: the LTM server in
+HTTP mode (`ltm-mcp --http`, the Rust binary; `server.py --http` behaves the
+same minus the `search`/`fetch` aliases) bound to 127.0.0.1, an outbound-only
+tunnel (Cloudflare Tunnel or Tailscale Funnel) in front of it, bearer token
+required on every request.
+
+| Client | Transport | Auth form | Section |
+|---|---|---|---|
+| claude.ai / Claude Desktop / mobile | streamable HTTP | token-in-URL | [claude.ai](#claudeai-web--desktop--mobile) |
+| Claude Code | stdio (or HTTP) | — / header | README quickstart |
+| ChatGPT + Deep Research | streamable HTTP | token-in-URL | [ChatGPT](#chatgpt-apps--connectors) |
+| Codex (CLI + IDE extension) | stdio or HTTP | — / bearer env var | [Codex](#openai-codex-cli--ide) |
+| Gemini CLI / Gemini API | HTTP | header | [Gemini](#gemini) |
+| Cursor | stdio or HTTP | — / header | [Cursor](#cursor) |
+| LM Studio | stdio or HTTP | — / header | [LM Studio](#lm-studio) |
+| OpenRouter, Ollama, Groq, any OpenAI-compatible API | via `ltm-bridge` | — | [OpenAI-compatible APIs](#openrouter-and-other-openai-compatible-apis) |
 
 Throughout, `ltm.<domain>` is your tunnel hostname (set `LTM_PUBLIC_HOST` to
 it) and `<token>` is the contents of your bearer-token file
@@ -38,10 +52,70 @@ it) and `<token>` is the contents of your bearer-token file
 3. Name `LTM`, MCP server URL: `https://ltm.<domain>/t/<token>/mcp`,
    Authentication: **No authentication** (the token rides in the URL).
 4. Trust prompt → create. Use it in chat with Developer mode on.
-5. Honest limitation: ChatGPT's **Deep Research** connector slot expects
-   tools named exactly `search`/`fetch`; this server exposes
-   `ltm_search`/`ltm_get_document`/`ltm_stats`, so it works in normal
-   dev-mode chat, not as a Deep Research source (alias tools could be added).
+5. **Deep Research** works too: OpenAI's connector contract requires tools
+   named exactly `search`/`fetch`, and the Rust server registers those
+   aliases automatically in HTTP mode (thin wrappers over
+   `ltm_search`/`ltm_get_document`; `LTM_COMPAT_TOOLS=on|off|auto`
+   overrides). Pick the LTM connector as a source when starting a Deep
+   Research run.
+
+## OpenAI Codex (CLI + IDE)
+
+Codex CLI and the Codex IDE extension share `~/.codex/config.toml`
+(project-scoped: `.codex/config.toml`).
+
+Same machine as the LTM (stdio — simplest):
+
+```toml
+[mcp_servers.ltm]
+command = "/path/to/ltm-mcp"        # cargo build --release → target/release/ltm-mcp
+```
+
+Remote over the tunnel (streamable HTTP; keeps the token out of the config
+file via an env var):
+
+```bash
+export LTM_TOKEN=<token>            # put in your shell profile
+codex mcp add ltm --url "https://ltm.<domain>/mcp" \
+  --bearer-token-env-var LTM_TOKEN
+```
+
+or equivalently in `config.toml`:
+
+```toml
+[mcp_servers.ltm]
+url = "https://ltm.<domain>/mcp"
+bearer_token_env_var = "LTM_TOKEN"
+```
+
+Verify with `codex mcp list`, then ask Codex to "use ltm_stats".
+
+## Cursor
+
+`~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (per project) —
+Cursor supports both stdio and remote HTTP with headers:
+
+```json
+{
+  "mcpServers": {
+    "ltm": {
+      "url": "https://ltm.<domain>/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}
+```
+
+(Same machine instead: `{ "command": "/path/to/ltm-mcp" }`.) Then Cursor
+Settings → MCP → confirm the `ltm_*` tools show up; the agent uses them
+automatically.
+
+## LM Studio
+
+LM Studio's `mcp.json` (chat sidebar → **Program** tab → Install → **Edit
+mcp.json**) follows Cursor's notation exactly — both forms above work
+verbatim: `command` when LM Studio runs on the same machine as the LTM, or
+`url` + `headers` to reach it over the tunnel from another machine.
 
 ## Gemini
 
@@ -60,6 +134,51 @@ support**. MCP works in Google's developer surfaces:
   }
   ```
   (the CLI supports headers, so use the cleaner header form.)
+
+- **Gemini API** (`google-genai` Python SDK): the SDK accepts an MCP
+  `ClientSession` directly as a tool and drives the calls itself:
+
+  ```python
+  import asyncio
+  from google import genai
+  from mcp import ClientSession
+  from mcp.client.streamable_http import streamablehttp_client
+
+  async def main():
+      client = genai.Client()  # needs GEMINI_API_KEY
+      async with streamablehttp_client(
+              "https://ltm.<domain>/mcp",
+              headers={"Authorization": "Bearer <token>"}) as (r, w, _):
+          async with ClientSession(r, w) as session:
+              await session.initialize()
+              resp = await client.aio.models.generate_content(
+                  model="gemini-2.5-pro",
+                  contents="Which lease covers unit 4B? Search the LTM.",
+                  config=genai.types.GenerateContentConfig(tools=[session]))
+              print(resp.text)
+
+  asyncio.run(main())
+  ```
+
+## OpenRouter and other OpenAI-compatible APIs
+
+OpenRouter, Ollama, Groq, vLLM, and the OpenAI API itself don't execute MCP
+tools server-side — the model returns `tool_calls` and *your* code must run
+them. The workspace ships that code as a Rust binary:
+[`crates/ltm-bridge`](../crates/ltm-bridge). It exposes the LTM tools to any
+`/v1/chat/completions` endpoint and loops model → tool → model.
+
+```bash
+export OPENAI_BASE_URL=https://openrouter.ai/api/v1   # or LM Studio/Ollama/...
+export OPENAI_API_KEY=sk-or-...
+export OPENAI_MODEL=openai/gpt-4o-mini                # any tool-calling model
+cargo run --release -p ltm-bridge -- "which lease covers unit 4B?"
+# or with no question for an interactive chat loop
+```
+
+Alternatively, apps that sit on top of OpenRouter and have their own MCP
+support (Cline, Open WebUI, LibreChat, ...) can connect directly with the
+same `url` + `Authorization` header shape as the Cursor config above.
 
 ## Rotate the bearer token
 

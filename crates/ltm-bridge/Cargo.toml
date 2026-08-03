@@ -1,0 +1,29 @@
+# ltm-bridge — expose the LTM MCP server's tools to any OpenAI-compatible
+# chat API (OpenRouter, LM Studio's server mode, Ollama, Groq, vLLM, the
+# OpenAI API). None of these execute MCP tools server-side: the model returns
+# `tool_calls` and the CLIENT must run them. This binary is that client — it
+# connects to the LTM over MCP streamable HTTP, advertises the tools as
+# OpenAI function definitions, and loops model -> tool -> model.
+#
+# Not part of the runtime server; a leaf utility like ltm-e2e.
+
+[package]
+name = "ltm-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "ltm-bridge"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+rmcp = { version = "3", features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+    "reqwest-native-tls",
+] }
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full"] }

@@ -21,6 +21,7 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
@@ -121,6 +122,19 @@ struct GetDocumentArgs {
 #[derive(Clone)]
 struct LtmServer {
     state: Arc<AppState>,
+    router: ToolRouter<LtmServer>,
+}
+
+impl LtmServer {
+    /// `compat` additionally registers the ChatGPT-connector `search`/`fetch`
+    /// aliases (see [`compat_tools_enabled`]).
+    fn new(state: Arc<AppState>, compat: bool) -> Self {
+        let mut router = Self::tool_router();
+        if compat {
+            router += Self::tool_router_compat();
+        }
+        Self { state, router }
+    }
 }
 
 #[tool_router]
@@ -194,7 +208,92 @@ vector index status (whether searches are fast HNSW or slow seq scan)."
     }
 }
 
-#[tool_handler]
+// ---------------------------------------------------------------------------
+// ChatGPT-connector compatibility: OpenAI's connector / Deep Research contract
+// requires tools named EXACTLY `search` and `fetch`, each taking a single
+// string (search -> {"results": [{id, title, text, url}]}, fetch -> {id,
+// title, text, url, metadata}). Thin aliases over the same read-only pipeline
+// (see ltm-tools compat_search/compat_fetch) — no new capability. Registered
+// in HTTP mode by default (cloud connectors arrive over HTTP); local stdio
+// clients keep the clean 3-tool surface unless LTM_COMPAT_TOOLS=on.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(crate = "rmcp::serde")]
+struct CompatSearchArgs {
+    /// Natural-language search query.
+    query: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(crate = "rmcp::serde")]
+struct CompatFetchArgs {
+    /// Document id from a `search` result.
+    id: String,
+}
+
+#[tool_router(router = tool_router_compat)]
+impl LtmServer {
+    #[tool(
+        name = "search",
+        description = "Search the user's private Long-Term Memory corpus (~100K local documents: \
+property management, loans, legal, banking, leases, taxes, email, ...). Returns matching \
+documents with an id usable with the `fetch` tool.\n\n\
+The `confidence` field is an honest gate: \"LOW\" means the top hit scored so poorly the \
+answer is likely NOT in the corpus — report that rather than forcing an answer from weak hits."
+    )]
+    async fn compat_search(
+        &self,
+        Parameters(args): Parameters<CompatSearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let state = self.state.clone();
+        let value =
+            tokio::task::spawn_blocking(move || state.tools().compat_search(&args.query))
+                .await
+                .map_err(join_err)?;
+        Ok(CallToolResult::structured(value))
+    }
+
+    #[tool(
+        name = "fetch",
+        description = "Fetch the full extracted text of one document from the Long-Term Memory \
+corpus by its id (as returned by `search`)."
+    )]
+    async fn compat_fetch(
+        &self,
+        Parameters(args): Parameters<CompatFetchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let state = self.state.clone();
+        let value = tokio::task::spawn_blocking(move || {
+            let key = parse_doc_key(&args.id);
+            state.tools().compat_fetch(&key)
+        })
+        .await
+        .map_err(join_err)?;
+        if value.get("error").is_some() && value.get("id").is_none() {
+            return Ok(CallToolResult::structured_error(value));
+        }
+        Ok(CallToolResult::structured(value))
+    }
+}
+
+/// Whether to register the `search`/`fetch` aliases: LTM_COMPAT_TOOLS
+/// "on"/"off" forces, anything else ("auto") follows the transport — on for
+/// HTTP (where cloud connectors arrive), off for stdio.
+fn compat_tools_enabled(http: bool) -> bool {
+    match std::env::var("LTM_COMPAT_TOOLS")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "on" | "1" | "true" | "yes" => true,
+        "off" | "0" | "false" | "no" => false,
+        _ => http,
+    }
+}
+
+#[tool_handler(router = self.router)]
 impl ServerHandler for LtmServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -239,6 +338,7 @@ fn main() {
         .init();
 
     let http = std::env::args().any(|a| a == "--http");
+    let compat = compat_tools_enabled(http);
     let cfg = Config::from_env();
 
     let store = match PgStore::connect(&cfg) {
@@ -252,10 +352,11 @@ fn main() {
     let rerank: Arc<dyn Reranker> = Arc::from(make_reranker(&cfg));
 
     tracing::info!(
-        "ltm-mcp (Rust): transport={} embed={} rerank_available={}",
+        "ltm-mcp (Rust): transport={} embed={} rerank_available={} compat_tools={}",
         if http { "http" } else { "stdio" },
         embed.describe(),
         rerank.available(),
+        compat,
     );
 
     let state = Arc::new(AppState { cfg, store, embed, rerank });
@@ -272,9 +373,9 @@ fn main() {
     // here on the main thread, after the runtime is torn down — never inside a
     // running runtime.
     let result = if http {
-        rt.block_on(run_http(state.clone()))
+        rt.block_on(run_http(state.clone(), compat))
     } else {
-        rt.block_on(run_stdio(state.clone()))
+        rt.block_on(run_stdio(state.clone(), compat))
     };
 
     drop(rt);
@@ -287,15 +388,15 @@ fn main() {
 }
 
 /// Default stdio transport for local MCP clients.
-async fn run_stdio(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
-    let server = LtmServer { state };
+async fn run_stdio(state: Arc<AppState>, compat: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let server = LtmServer::new(state, compat);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
 
 /// Bearer-gated streamable HTTP transport (mirrors server.py `run_http`).
-async fn run_http(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_http(state: Arc<AppState>, compat: bool) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = &state.cfg;
     let token = Arc::new(load_or_create_token(&cfg.http_token_file)?);
 
@@ -315,7 +416,7 @@ async fn run_http(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>
 
     let factory_state = state.clone();
     let mcp_service = StreamableHttpService::new(
-        move || Ok(LtmServer { state: factory_state.clone() }),
+        move || Ok(LtmServer::new(factory_state.clone(), compat)),
         Arc::new(LocalSessionManager::default()),
         http_config,
     );
@@ -469,4 +570,40 @@ fn load_or_create_token(path: &str) -> std::io::Result<String> {
     f.write_all(b"\n")?;
     tracing::info!("minted new bearer token at {path}");
     Ok(tok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_router_has_the_three_tools() {
+        let names: Vec<String> = LtmServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert_eq!(names.len(), 3);
+        for n in ["ltm_search", "ltm_get_document", "ltm_stats"] {
+            assert!(names.contains(&n.to_string()), "missing {n}");
+        }
+    }
+
+    #[test]
+    fn compat_router_has_exactly_search_and_fetch() {
+        let mut names: Vec<String> = LtmServer::tool_router_compat()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["fetch".to_string(), "search".to_string()]);
+    }
+
+    #[test]
+    fn combined_router_lists_all_five() {
+        let mut router = LtmServer::tool_router();
+        router += LtmServer::tool_router_compat();
+        assert_eq!(router.list_all().len(), 5);
+    }
 }
