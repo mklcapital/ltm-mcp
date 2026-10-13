@@ -1,0 +1,3 @@
+# mcp 2.x renamed FastMCP; this server imports mcp.server.fastmcp.
+mcp>=1.28,<2
+pg8000>=1.31
